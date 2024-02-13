@@ -28,6 +28,69 @@ class Router:
     def send(self, network, message):
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
+    def route_update(self, msg, src):
+        # Accept route update messages from the BGP neighbors, and forward updates as appropriate (forward route announcements)
+        network = msg['msg']['network']
+        netmask = msg['msg']['netmask']
+        self.routing_table[(network, netmask)] = { # this is the format of the routing_table, given in the project page
+            'network': msg['msg']['network'],
+            'netmask': msg['msg']['netmask'],
+            'localpref': msg['msg']['localpref'],
+            'selfOrigin': msg['msg']['selfOrigin'],
+            'ASPath': msg['msg']['ASPath'],
+            'origin': msg['msg']['origin']
+        }
+        if self.relations[src] == 'customer':
+            # Send updates to all other neighbors
+            self.forward_update(msg, src)
+        else:
+            # Send updates to only your customers
+            for neighbor, relation in self.relations.items():
+                if relation == 'customer':
+                    self.forward_update(msg, neighbor)
+
+    def forward_update(self, msg, src): # forward the update to the listed neighbors
+        network = msg['msg']['network'] # extract the network and the netmask from the message section 
+        netmask = msg['msg']['netmask'] # (see proj1 for exact composition of messages)
+        for neighbor, relation in self.relations.items():
+            if relation == 'customer' or (relation == 'peer' and src in self.relations and self.relations[src] == 'customer'):
+                update_msg = { # only send the network netmask and ASPath
+                    "src": self.our_addr(src),
+                    "dst": neighbor,
+                    "type": "update",
+                    "msg": {
+                        "network": network,
+                        "netmask": netmask,
+                        "ASPath": msg['msg']['ASPath']
+                    }
+                }
+                self.send(neighbor, update_msg)
+
+    def handle_dump_message(self, src):
+        print("Handling dump message from:", src)
+        
+        table_msg = {
+            "src": self.our_addr(src),  # our router
+            "dst": src,  # the neighboring router
+            "type": "table",
+            "msg": []
+        }
+        print("Routing table:", self.routing_table)
+        for route in self.routing_table.values():
+            print("Adding route to routing table message:", route)
+            table_msg["msg"].append({
+                "network": route["network"],
+                "netmask": route["netmask"],
+                "peer": self.our_addr(src),  # Update to actual next-hop IP address
+                "localpref": route["localpref"],
+                "ASPath": route["ASPath"],
+                "selfOrigin": route["selfOrigin"],
+                "origin": route["origin"]
+            })
+        print("Sending routing table message:", table_msg)
+        self.send(src, json.dumps(table_msg))  # Send the routing table message to the source
+        print("Routing table message sent.")
+
     def run(self):
         while True:
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
