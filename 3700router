@@ -7,13 +7,13 @@ class Router:
     relations = {}
     sockets = {}
     ports = {}
+    routing_table = {} #added for a easy access routing table for 
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
         self.asn = asn
         for relationship in connections:
             port, neighbor, relation = relationship.split("-")
-
             self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sockets[neighbor].bind(('localhost', 0))
             self.ports[neighbor] = int(port)
@@ -42,31 +42,31 @@ class Router:
         }
         if self.relations[src] == 'customer':
             # Send updates to all other neighbors
-            self.forward_update(msg, src)
-        else:
+            for neighbor, relation in self.relations.items():
+                self.forward_update(msg, neighbor)
+            # self.forward_update(msg, src)
+        elif self.relations[src] == 'peer' or self.relations[src] == 'provider':
             # Send updates to only your customers
             for neighbor, relation in self.relations.items():
                 if relation == 'customer':
                     self.forward_update(msg, neighbor)
 
-    def forward_update(self, msg, src): # forward the update to the listed neighbors
+    def forward_update(self, msg, neighbor_ip): # forward the update to the listed neighbors
         network = msg['msg']['network'] # extract the network and the netmask from the message section 
         netmask = msg['msg']['netmask'] # (see proj1 for exact composition of messages)
-        for neighbor, relation in self.relations.items():
-            if relation == 'customer' or (relation == 'peer' and src in self.relations and self.relations[src] == 'customer'):
-                update_msg = { # only send the network netmask and ASPath
-                    "src": self.our_addr(src),
-                    "dst": neighbor,
-                    "type": "update",
-                    "msg": {
-                        "network": network,
-                        "netmask": netmask,
-                        "ASPath": msg['msg']['ASPath']
-                    }
-                }
-                self.send(neighbor, update_msg)
+        update_msg = { # only send the network netmask and ASPath
+            "src": self.our_addr(neighbor_ip),
+            "dst": neighbor_ip,
+            "type": "update",
+            "msg": {
+                "network": network,
+                "netmask": netmask,
+                "ASPath": msg['msg']['ASPath']
+            }
+        }
+        self.send(neighbor_ip, update_msg)
 
-    def handle_dump_message(self, src):
+    def dump_message(self, src):
         print("Handling dump message from:", src)
         
         table_msg = {
@@ -91,6 +91,36 @@ class Router:
         self.send(src, json.dumps(table_msg))  # Send the routing table message to the source
         print("Routing table message sent.")
 
+    def handle_message(self, msg):
+        if isinstance(msg, str):  # Check if msg is a string
+            try:
+                msg = json.loads(msg)  # Convert string to dictionary
+            except json.JSONDecodeError:
+                print("Error decoding JSON message:", msg)
+                return
+        msg_type = msg.get("type")
+        if msg_type == "update":
+            print("calling route update method")
+            self.route_update(msg, msg.get("src"))
+        elif msg_type == "withdraw":
+            # Call withdraw function
+            pass
+        elif msg_type == "data":
+            # Call data function
+            pass
+        elif msg_type == "no route":
+            # Call no route function
+            pass
+        elif msg_type == "dump":
+            print("calling dump message method")
+            self.dump_message(msg.get("src"))
+        elif msg_type == "table":
+            # Call no route function
+            pass
+        elif msg_type == "handshake":
+            # Call handshake function
+            pass
+
     def run(self):
         while True:
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
@@ -102,7 +132,8 @@ class Router:
                         srcif = sock
                         break
                 msg = k.decode('utf-8')
-
+                #msg = json.loads(data.decode('utf-8'))
+                self.handle_message(msg)
                 print("Received message '%s' from %s" % (msg, srcif))
         return
 
@@ -112,4 +143,4 @@ if __name__ == "__main__":
     parser.add_argument('connections', metavar='connections', type=str, nargs='+', help="connections")
     args = parser.parse_args()
     router = Router(args.asn, args.connections)
-    router.run()
+    router.run()  
