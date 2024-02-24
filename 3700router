@@ -1,24 +1,27 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
-
+from table import Table
+    
 class Router:
-
     relations = {}
     sockets = {}
     ports = {}
-    routing_table = {} #added for a easy access routing table
+    routing_table: Table
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
         self.asn = asn
+        self.updates = [] #added to log all the "update" type messages
+        self.withdrawals = [] #added to log all the "withdraw" type messages
+        self.routing_table = Table()
         for relationship in connections:
             port, neighbor, relation = relationship.split("-")
             self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sockets[neighbor].bind(('localhost', 0))
             self.ports[neighbor] = int(port)
             self.relations[neighbor] = relation
-            self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
+            self.send(neighbor, json.dumps({"type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}}))
 
     def our_addr(self, dst): # gets self's address based on another address
         quads = list(int(qdn) for qdn in dst.split('.'))
@@ -31,41 +34,29 @@ class Router:
             self.sockets[network].bind(('localhost', 0))
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
-    def route_update(self, msg, src, dst):
-        # Accept route update messages from the BGP neighbors, and forward updates as appropriate (forward route announcements)
+    def route_update(self, msg):
         print("message:", msg)
-        self.routing_table[src] = { # this is the format of the routing_table, given in the project page
-            'network': msg['msg']['network'],
-            'netmask': msg['msg']['netmask'],
-            'localpref': msg['msg']['localpref'],
-            'selfOrigin': msg['msg']['selfOrigin'],
-            'ASPath': msg['msg']['ASPath'][:],
-            'origin': msg['msg']['origin'],
-            'peer': src
-        }
-        print("Routing table:", self.routing_table)
-        if self.relations[src] == 'cust': #call relations on self, indexed by the src
+        self.updates.append(msg)
+        self.routing_table.route_update_helper(msg)
+        if self.relations[msg["src"]] == 'cust': #call relations on self, indexed by the src
             # Send updates to all other neighbors
             print("reached forward_update method(all)")
             for neighbor in self.relations.keys():
-                if neighbor != src:
+                if neighbor != msg["src"]:
                     self.forward_update(msg, neighbor)
             # self.forward_update(msg, src)
-        elif self.relations[src] == 'peer' or self.relations[src] == 'prov':
+        elif self.relations[msg["src"]] == 'peer' or self.relations[msg["src"]] == 'prov':
             # Send updates to only your customers
             print("reached forward_update method(only cust)")
             for neighbor, relation in self.relations.items():
                 if relation == 'cust':
-                    if neighbor != src:
+                    if neighbor != msg["src"]:
                         self.forward_update(msg, neighbor)
 
-    def forward_update(self, msg, neighbor_ip): # forward the update to the listed neighbors
-        # (see proj1 for exact composition of messages)
-        # need to parse message
+    def forward_update(self, msg, neighbor_ip):
         ASPathnew = msg['msg']['ASPath'][:] #create a copy so we dont change the actual aspath
         if self.asn not in ASPathnew:
             ASPathnew.insert(0, self.asn)
-        
         update_msg = { # only send the network netmask and ASPath
             "src": self.our_addr(neighbor_ip),
             "dst": neighbor_ip,
@@ -73,225 +64,101 @@ class Router:
             "msg": {
                 "network": msg['msg']['network'],
                 "netmask": msg['msg']['netmask'],
-                "ASPath": ASPathnew #changing the asn permanently, but not supposed to
+                "ASPath": ASPathnew 
             }
         }
         print("reached send part of forward_update")
         self.send(neighbor_ip, json.dumps(update_msg))
 
-    # def withdraw(self, msg, src):
-    #     networks = msg['msg']
-    #     print("Networks for withdraw:", networks)
-    #     for entry in networks:
-    #         network = entry['network']
-    #         netmask = entry['netmask']
-    #         for item, route_info in self.routing_table.items():
-    #             if route_info['network'] == network and route_info['netmask'] =+ netmask:
-    #                 del self.routing_table[item] #(2) remove the dead entry from the forwarding table
-    #                 self.forward_withdraw(msg, src) #(3) possibly send copies of the revocation to other neighboring routers
-    #                 break
+    def withdraw(self, msg, srcif):
+        # (1) save a copy of the revocation, in case you need it later
+        withdrawal_messages = []
+        # loop thru each withdrawal in msg, if it matches in updates, then append it to withdrawal messages
+        for withdrawal in msg["msg"]:
+            for i, update in self.updates(self.updates):
+                if update["src"] == msg["src"] and update["msg"]["network"] == withdrawal["network"] and update["msg"]["netmask"] == withdrawal["netmask"]:
+                    withdrawal_messages.append(update)
+        
+        # (2) remove the dead entry from the forwarding table
+        for update in withdrawal_messages:
+            print("Removing", update)
+            self.updates.remove(update)
 
-    def forward_withdraw(self, msg, src):
-        for neighbor, relation in self.relations.items():
-            self.forward_update(msg, neighbor)
+        self.routing_table.new_table(self.updates)
 
-    def data_message(self, msg, src, dst, msg_to_send, srcif):
-        # find the best route, return None if no route
-        print("destination(data)", dst)
-        best_route = self.find_best_route(dst)
-        print("best route:", best_route)
-        legal_route = self.check_forwarding_legal(src, dst)
-        print("legal route?: ", legal_route)
-        print("relations: ", self.relations)
-        print("sockets: ", self.sockets)
-        print("routing table:", self.routing_table)
-        # if forwarding is legal and best route exists
-        if legal_route and best_route:
-                # forward data message to next hop
-                print("reached send part of data message")
-                print("best route (peer)", best_route['peer'])
-                data_msg = {
-                    "src": src,
-                    "dst": dst,
-                    "type": "data",
-                    "msg": msg_to_send
-                }
-                self.send(best_route['peer'], json.dumps(data_msg))
-                print("successfully sent data")
+        # (3) possibly send copies of the revocation to other neighboring routers
+        # followed the same logic as forward_update function
+
+        if self.relations[msg["src"]] == 'cust': #call relations on self, indexed by the src
+            # Send updates to all other neighbors
+            print("reached forward_update method(all)")
+            for neighbor in self.relations.keys():
+                if neighbor != srcif:
+                    msg["src"] = self.our_addr(neighbor)
+                    msg["dst"] = neighbor
+                    print("reached send part of forward_withdraw")
+                    self.send(neighbor, json.dumps(msg))
+            # self.forward_update(msg, src)
+        elif self.relations[msg["src"]] == 'peer' or self.relations[msg["src"]] == 'prov':
+            # Send updates to only your customers
+            print("reached forward_update method(only cust)")
+            for neighbor, relation in self.relations.items():
+                if relation == 'cust':
+                    if neighbor != srcif:
+                        msg["src"] = self.our_addr(neighbor)
+                        msg["dst"] = neighbor
+                        print("reached send part of forward_withdraw")
+                        self.send(neighbor, json.dumps(msg))
+
+    def data_message(self, msg, srcif):
+        #this is the no route message as given by the insrtuctions
+        no_route_message = json.dumps({
+            "src": self.our_addr(msg["src"]),
+            "dst": msg["src"],
+            "type": "no route",
+            "msg": {}
+        })
+        find_possible_routes = self.routing_table.find_possible_routes(msg["dst"])
+        # if there is a best route and srcif or final destination are customers, then send the message. Otherwise, send no route
+        if find_possible_routes:
+            final_destination = sorted(find_possible_routes)[0].peer
+            if self.relations[srcif] == "cust" or self.relations[final_destination] == "cust":
+                self.send(final_destination, json.dumps(msg))
+            else:
+                # if nobody can pay us for sending the message, drop it(no route message)
+                self.send(srcif, no_route_message)
         else:
             # if no legal route is found, send "no route" message back to source
-            print("reached no route part of data message")
-            no_route_msg = {
-                "src": src,
-                "dst": dst,
-                "type": "no route",
-                "msg": {}
-            }
-            self.send(srcif, json.dumps(no_route_msg))
+            self.send(srcif, no_route_message)
 
-
-    def find_best_route(self, dst):
-        print("destination(best route)", dst)
-        possible_routes = self.find_possible_routes(dst)
-        if len(possible_routes) < 1: # if no possible route, send no route message
-            return None
-        elif len(possible_routes) == 1: # if there is only one route, send message to appropriate port
-            return possible_routes[0]
-        else: # if there are multiple routes, enter helper method to continue finding best route
-            return self.break_ties(possible_routes)
-
-
-    #Possibly wrong; How do we compare viable routes, first quad? entire prefix? Right now: first quad
-    def find_possible_routes(self, dst):
-        # split te destination network into four parts
-        dst_network = dst.split(".")[0]
-        print("destination(find possible route): ", dst)
-        print("destination network: ", dst_network)
-        # dst_network = '.'.join(dst.split('.')[:2])
-        possible_routes = []
-        # check if the network route matches the destination route for each route in routing table
-        for route in self.routing_table.values():
-            route_network = route["network"].split(".")[0]
-            print("route_network: ", route_network)
-            # route_network = '.'.join(route["network"].split('.')[:2])
-            if  route_network == dst_network:
-                possible_routes.append(route)
-        print("Possible routes:", possible_routes)
-        return possible_routes
-
-    def break_ties(self, possible_routes):
-        print("calling break ties method")
-        best_route = []
-        #Prioritize the longest prefix match (172.128.0.0/9 > 172.128.0.0/8) 
-        longest_mask = 0
-        for route in possible_routes:
-            # calculates the length of the netmask by converting it to binary and counting the set bits
-            mask_length = sum(bin(int(x)).count('1') for x in route["netmask"].split('.'))
-            # if this mask_length is longer than longest, then update longest
-            if mask_length > longest_mask:
-                longest_mask = mask_length
-                best_route = [route]
-            # if this mask if equal to longest, then append to longest
-            elif mask_length == longest_mask:
-                best_route.append(route)
-        # if there is only one best route, return it
-        if len(best_route) == 1:
-            return best_route[0]
-        print("best routes:", best_route)
-        # if there are multiple entries for a given network, then break the following ties in best_route
-
-        # The entry with the highest localpref wins. If the localprefs are equal…
-        # find highest local pref
-        highest_localpref = 0
-        for route in best_route: 
-            if int(route["localpref"]) > highest_localpref:
-                highest_localpref = int(route["localpref"])
-        #filter out routes that do not have the highest local pref
-        best_route = [route for route in best_route if int(route["localpref"]) == highest_localpref]
-        if len(best_route) == 1:
-            return best_route[0]
-        print("best routes:", best_route)
-
-        # The entry with selfOrigin as true wins. If all selfOrigins are the equal…
-        #check if any route has true selfOrigin.
-        has_true_self_origin = any(route["selfOrigin"] == "true" for route in best_route)
-        # if a route does, remove every route without true selfOrigin
-        if has_true_self_origin:
-            best_route = [route for route in best_route if route["selfOrigin"] == "true"]
-        if len(best_route) == 1:
-            return best_route[0]
-        print("best routes:", best_route)
-
-        # The entry with the shortest ASPath wins. If multiple entries have the shortest length…
-        #find the shortest ASPath length
-        shortest_aspath = min(route["ASPath"] for route in best_route)
-        #filter out routes that do not have the shortest aspath
-        best_route = [route for route in best_route if len(route["ASPath"]) == shortest_aspath]
-        if len(best_route) == 1:
-            return best_route[0]
-        print("best routes:", best_route)
-
-        # The entry with the best origin wins, where IGP > EGP > UNK. If multiple entries have the best origin…
-        # create a set of all the origins and find the best origin
-        origins = set(route["origin"] for route in best_route)
-        if "IGP" in origins:
-            curr_best_origin = "IGP"
-        elif "EGP" in origins:
-            curr_best_origin = "EGP"
-        else:
-            curr_best_origin = "UNK"
-        #filter out routes that do not have the best origin
-        best_route = [route for route in best_route if route["origin"] == curr_best_origin]
-        if len(best_route) == 1:
-            return best_route[0]
-        print("best routes:", best_route)
-
-        # The entry from the neighbor router (i.e., the src of the update message) with the lowest IP address.
-        lowest_IPaddress = float('inf')
-        #find the lowest IP address
-        for route in best_route:
-            route_IP = int(route["peer"].replace(".", ""))
-            if route_IP < lowest_IPaddress:
-                lowest_IPaddress = route_IP
-        #filter out routes that do not have the lowest IP address
-        best_route = [route for route in best_route if int(route["peer"].replace(".", "")) == lowest_IPaddress]
-        return best_route[0]
-
-    #src and dst not even in relations for some reason
-    def check_forwarding_legal(self, src, dst):
-        print("Is source in relations?: ", src in self.relations)
-        print("Is destination in relations?: ", dst in self.relations)
-        src_cust = (src in self.relations and self.relations[src] == "cust")
-        print("Is source a customer?: ", src_cust)
-        dst_cust = (dst in self.relations and self.relations[dst] == "cust")
-        print("Is destination a customer?: ", dst_cust)
-        # return src_cust or dst_cust
-        return True
-
-    def dump_message(self, src, dst):
-        print("Handling dump message from:", src)
-        
-        table_msg = {
-            "src": dst, # my router
-            "dst": src, # the neighboring router
+    def dump_message(self, msg):
+        print("Handling dump message from:", msg['src'])
+        dump_table_msg = {
+            "src": self.our_addr(msg["src"]), # my router
+            "dst": msg["src"], # the neighboring router
             "type": "table",
-            "msg": [] # will be filled in the following for loop
+            "msg": self.routing_table.get_table_as_list() # will be filled by helper method
         }
-        print("Routing table:", self.routing_table)
-        for route in self.routing_table.values():
-            print("Adding route to routing table message:", route)
-            table_msg["msg"].append({
-                "network": route["network"],
-                "netmask": route["netmask"],
-                "peer": route["peer"],  # Update to src route['src']
-                "localpref": route["localpref"],
-                "ASPath": route["ASPath"],
-                "selfOrigin": route["selfOrigin"],
-                "origin": route["origin"]
-            })
-        print("Sending routing table message:", table_msg)
-        self.send(src, json.dumps(table_msg))  # Send the routing table message to the neighboring router
-        print("Routing table message sent.")
+        self.send(msg["src"], json.dumps(dump_table_msg))
 
+    # calls the appropriate function based on the message "type"
     def handle_message(self, msg, srcif):
         msg = json.loads(msg)
         msg_type = msg.get("type")
         if msg_type == "update":
             print("calling route update method")
-            self.route_update(msg, msg.get("src"), msg.get("dst"))
+            self.route_update(msg)
         elif msg_type == "withdraw":
             print("calling route withdraw method")
-            self.withdraw(msg, msg.get("src"), msg.get("dst"))
-            pass
+            self.withdraw(msg, srcif)
         elif msg_type == "data":
-            print(msg.get("dst"))
             print("calling data message method")
-            self.data_message(msg, msg.get("src"), msg.get("dst"), msg.get("msg"), srcif)
+            self.data_message(msg, srcif)
             print("data message sent(handle message version)")
         elif msg_type == "dump":
             print("calling dump and table method")
-            self.dump_message(msg.get("src"), msg.get("dst"))
-
+            self.dump_message(msg)
+    
     def run(self):
         while True:
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
@@ -313,4 +180,4 @@ if __name__ == "__main__":
     parser.add_argument('connections', metavar='connections', type=str, nargs='+', help="connections")
     args = parser.parse_args()
     router = Router(args.asn, args.connections)
-    router.run()  
+    router.run()
