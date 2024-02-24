@@ -57,19 +57,14 @@ class Network:
     def __eq__(self, other):
         return self.__dict__ == other.__dict__
 
-    # converts the network to a string
-    def __repr__(self):
-        return f"{self.__dict__}"
-
-    # check if both networks have the same attributes(like peer, netmask, etc.)
+    # check if both networks have all the same attributes(like peer, netmask, etc.)
     def have_same_attributes(self, other):
         return (self.peer == other.peer and #check if peer attribute matches
             self.netmask == other.netmask and #check if netmask attribute matches
             self.localpref == other.localpref and #check if localpref attribute matches
             self.selfOrigin == other.selfOrigin and #check if selfOrigin attribute matches
             len(self.ASPath) == len(other.ASPath) and #check if ASPath lists length attribute matches
-            self.origin == other.origin #check if origin attribute matches
-        )
+            self.origin == other.origin) #check if origin attribute matches
 
     # check if an IPaddress is in this network through the first quadrant(prefix)
     def prefix_match(self, ip):

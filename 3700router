@@ -36,7 +36,7 @@ class Router:
 
     def route_update(self, msg):
         print("message:", msg)
-        self.updates.append(msg)
+        self.updates.append(msg) # log the updates for withdrawal method later
         self.routing_table.route_update_helper(msg)
         if self.relations[msg["src"]] == 'cust': #call relations on self, indexed by the src
             # Send updates to all other neighbors
@@ -75,7 +75,7 @@ class Router:
         withdrawal_messages = []
         # loop thru each withdrawal in msg, if it matches in updates, then append it to withdrawal messages
         for withdrawal in msg["msg"]:
-            for i, update in self.updates(self.updates):
+            for index, update in enumerate(self.updates):
                 if update["src"] == msg["src"] and update["msg"]["network"] == withdrawal["network"] and update["msg"]["netmask"] == withdrawal["netmask"]:
                     withdrawal_messages.append(update)
         
