@@ -1,8 +1,8 @@
-Project 3 - BGP Router
+BGP Router
 
 Three classes:
 Router
-The router is our main class, this is where the code is run, where messages are handled and most of level 1 to 5 tests' code happens.
+The router is the main class, this is where the code is run, where the connection is established and the messages are sorted by BGP routing policies/protocols.
 Here is a basic procedure of how a every message is handled:
 1. the code goes through the run function where it is decoded and handle_message is called
 2. the code goes through handle_message, which directs the message to the respective function based on the message "type"
@@ -16,7 +16,7 @@ The table class is also where most of my aggregation code is.
 Network
 This class is a helper to represent each network in a table.
 Each network is initialized with the attributes expected and shown in the instructions.
-I have my best route calculations here which i use for the data function.
+I have my best route calculations here which I use for the data function.
 The definition of lt and eq made it much easier to get the best route. I could just call sort() in the data fuction, and it fixed several bugs that I had with my previous messy approach
 
 The class also contains serialization methods that make the response to the "dump" message easy.
